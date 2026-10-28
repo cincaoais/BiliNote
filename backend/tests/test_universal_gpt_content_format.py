@@ -185,5 +185,26 @@ class TestBuildMergeMessagesContentFormat(unittest.TestCase):
         self.assertNotIn("image_url", serialized)
 
 
+class TestTemperatureFallback(unittest.TestCase):
+    def test_claude_deprecated_temperature_retries_without_it(self):
+        calls = []
+
+        def create(**kwargs):
+            calls.append(kwargs)
+            if "temperature" in kwargs:
+                raise Exception("Error code: 400 - '`temperature` is deprecated for this model.'")
+            return "ok"
+
+        client = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create))
+        )
+        gpt = UniversalGPT(client, model="claude-opus-5-5")
+
+        self.assertEqual(gpt._do_create([], tools=["lookup"]), "ok")
+        self.assertEqual(
+            calls[-1], {"model": "claude-opus-5-5", "messages": [], "tools": ["lookup"]}
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -34,11 +34,16 @@ class FakeSyncPage:
 
 
 class TestBuiltinFallbackModels(unittest.TestCase):
-    def test_deepseek_by_id_has_fallback(self):
-        # issue #417：DeepSeek /models 不稳定，必须有兜底清单
-        models = builtin_fallback_models({"id": "deepseek", "name": "DeepSeek"})
-        self.assertIn("deepseek-chat", models)
-        self.assertIn("deepseek-reasoner", models)
+    def test_builtin_provider_has_fallback(self):
+        # issue #417：DeepSeek / Claude 的 /models 不稳定，必须有兜底清单
+        cases = {
+            "deepseek": ("DeepSeek", ["deepseek-chat", "deepseek-reasoner"]),
+            "Claude": ("Claude", ["claude-opus-5-5", "claude-sonnet-5-5"]),
+        }
+        for pid, (name, expected) in cases.items():
+            with self.subTest(provider=pid):
+                models = builtin_fallback_models({"id": pid, "name": name})
+                assert set(expected) <= set(models), models
 
     def test_match_by_name_case_insensitive(self):
         models = builtin_fallback_models({"id": "whatever-uuid", "name": "deepseek"})

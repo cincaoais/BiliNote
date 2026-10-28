@@ -115,12 +115,7 @@ def chat(
     # 4. Tool calling 循环（最多 3 轮）
     max_rounds = 3
     for round_i in range(max_rounds):
-        response = gpt.client.chat.completions.create(
-            model=gpt.model,
-            messages=messages,
-            tools=TOOLS,
-            temperature=0.7,
-        )
+        response = gpt._chat_completion_create(messages, tools=TOOLS)
 
         msg = response.choices[0].message
 
@@ -149,10 +144,6 @@ def chat(
             })
 
     # 超过最大轮次，做最后一次不带 tools 的调用
-    response = gpt.client.chat.completions.create(
-        model=gpt.model,
-        messages=messages,
-        temperature=0.7,
-    )
+    response = gpt._chat_completion_create(messages)
 
     return {"answer": response.choices[0].message.content or "", "sources": sources}

@@ -71,10 +71,17 @@ class NoteGenerator:
         self.model_size: str = config_manager.get_whisper_model_size()
         self.device: Optional[str] = None
         self.transcriber_type: str = config_manager.get_transcriber_type()
-        self.transcriber: Transcriber = self._init_transcriber()
+        self._transcriber: Optional[Transcriber] = None
         self.video_path: Optional[Path] = None
         self.video_img_urls=[]
         logger.info("NoteGenerator 初始化完成")
+
+    @property
+    def transcriber(self) -> Transcriber:
+        # 有平台字幕时不加载转写模型（首次加载可能要下载，失败会拖垮整个请求）
+        if self._transcriber is None:
+            self._transcriber = self._init_transcriber()
+        return self._transcriber
 
 
     # ---------------- 公有方法 ----------------

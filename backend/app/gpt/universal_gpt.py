@@ -188,15 +188,17 @@ class UniversalGPT(GPT):
     @staticmethod
     def _is_temperature_unsupported_error(exc: Exception) -> bool:
         """OpenAI o1/o3/gpt-5 系列等新模型不接受自定义 temperature，
-        只允许默认值 1，传 0.7 会报 `'temperature' does not support 0.7 ...`。"""
+        只允许默认值 1，传 0.7 会报 `'temperature' does not support 0.7 ...`；
+        Claude 新模型则报 `` `temperature` is deprecated for this model ``。"""
         raw = str(exc).lower()
         return "temperature" in raw and (
             "does not support" in raw
             or "unsupported_value" in raw
             or "only the default" in raw
+            or "deprecated" in raw
         )
 
-    def _do_create(self, messages: list):
+    def _do_create(self, messages: list, **kwargs):
         """单次调用。如果模型拒绝自定义 temperature，就地去掉该参数再试一次
         （不消耗外层的重试次数预算），仍失败则把异常抛给外层重试逻辑。"""
         try:
@@ -204,6 +206,7 @@ class UniversalGPT(GPT):
                 model=self.model,
                 messages=messages,
                 temperature=self.temperature,
+                **kwargs,
             )
         except Exception as exc:
             if self._is_temperature_unsupported_error(exc):
@@ -211,14 +214,15 @@ class UniversalGPT(GPT):
                 return self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
+                    **kwargs,
                 )
             raise
 
-    def _chat_completion_create(self, messages: list):
+    def _chat_completion_create(self, messages: list, **kwargs):
         last_exc = None
         for attempt in range(self._max_retry_attempts):
             try:
-                return self._do_create(messages)
+                return self._do_create(messages, **kwargs)
             except Exception as exc:
                 last_exc = exc
                 if attempt == self._max_retry_attempts - 1 or not self._is_retryable_error(exc):

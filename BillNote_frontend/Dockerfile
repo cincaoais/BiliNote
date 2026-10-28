@@ -20,7 +20,9 @@ RUN pnpm install --frozen-lockfile
 
 # 再复制源代码并构建
 COPY ./BillNote_frontend/ ./
-RUN pnpm run build
+# Vite 构建峰值内存超过 Node 按容器可见内存推算的默认堆上限（小内存 Docker VM 里约 1.4GB），
+# 会报 "JavaScript heap out of memory"；显式放宽堆上限。
+RUN NODE_OPTIONS=--max-old-space-size=4096 pnpm run build
 
 # --- 阶段2：使用 nginx 作为静态服务器 ---
 # 重新声明 ARG —— buildkit 跨阶段不自动继承

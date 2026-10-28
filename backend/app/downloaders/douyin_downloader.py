@@ -3,14 +3,15 @@ import json
 import os
 import re
 from typing import Union, Optional
-from urllib.parse import quote, urlencode
 
 import httpx
 import requests
 from pydantic import BaseModel
 
 from app.downloaders.base import Downloader
+from app.downloaders.douyin_helper import browser_cookie
 from app.downloaders.douyin_helper.abogus import ABogus
+from app.downloaders.douyin_helper.websign import build_signed_query
 from app.enmus.note_enums import DownloadQuality
 from app.models.audio_model import AudioDownloadResult
 from app.services.cookie_manager import CookieConfigManager
@@ -113,8 +114,7 @@ class DouyinDownloader(Downloader):
     def __init__(self, cookie=None):
         super().__init__()
         self.headers_config = DouyinConfig.HEADERS.copy()
-        self.headers_config["Cookie"] = cfm.get('douyin')
-        print(self.headers_config)
+        self.headers_config.pop("Cookie", None)
         self.proxies_config = DouyinConfig.PROXIES.copy()
         self.ttwid_config = DouyinConfig.TTWID.copy()
         self.ms_token_config = DouyinConfig.MS_TOKEN.copy()
@@ -177,35 +177,72 @@ class DouyinDownloader(Downloader):
         except Exception as e:
             raise ValueError("Douyin msToken API{0}".format(e))
 
-    def fetch_video_info(self, video_url: str) -> json:
-        try:
+    def _resolve_cookie(self, refresh_guest: bool = False) -> tuple[str, str]:
+        """返回 (cookie, 来源)。来源为 "settings"（用户在 设置→下载 粘贴的）或 "guest"（CloakBrowser 游客）。
+        refresh_guest=True 时忽略已保存的 Cookie，强制换一份新的游客 Cookie（用于被抖音拦截后的重试）。"""
+        saved = (cfm.get('douyin') or "").strip()
+        if saved and not refresh_guest:
+            return saved, "settings"
+        return browser_cookie.get_guest_cookie(
+            refresh=refresh_guest, user_agent=self.headers_config["User-Agent"]
+        ), "guest"
 
-            aweme_id = self.extract_video_id(video_url)
-            kwargs = self.headers_config
-            print("@kwargs:", kwargs)
+    def _request_headers(self, cookie: str) -> dict:
+        return {**self.headers_config, "Cookie": cookie}
+
+    def fetch_video_info(self, video_url: str) -> dict:
+        return self._fetch_detail(video_url)[0]
+
+    def _fetch_detail(self, video_url: str) -> tuple[dict, str]:
+        """返回 (视频详情 JSON, 本次成功使用的 Cookie)。Cookie 供后续下载音视频文件时复用。"""
+        aweme_id = self.extract_video_id(video_url)
+        if not aweme_id:
+            raise ValueError("无法从链接中提取抖音视频 ID")
+
+        last_block = None
+        for attempt in range(2):
+            cookie, source = self._resolve_cookie(refresh_guest=(attempt == 1))
             base_params = BaseRequestModel().model_dump()
             base_params["msToken"] = self.gen_real_msToken()
-
             base_params["aweme_id"] = aweme_id
-            bogus = ABogus()
-            ab_value = bogus.get_value(base_params)
-            a_bogus = quote(ab_value, safe='')
-            print("@a_bogus:", a_bogus)
+            ab_value = ABogus().get_value(base_params)
+            print("@a_bogus:", ab_value)
             print(base_params)
-            query_str = urlencode(base_params)
-            full_url = f"{DOUYIN_DOMAIN}/aweme/v1/web/aweme/detail/?{query_str}&a_bogus={a_bogus}"
+            query_str, sign_headers = build_signed_query(
+                [*base_params.items(), ("a_bogus", ab_value)], cookie
+            )
+            full_url = f"{DOUYIN_DOMAIN}/aweme/v1/web/aweme/detail/?{query_str}"
 
-            print("Request URL:", full_url)
+            # the signed query carries cookie values (uifid, verifyFp), so log the path only
+            print("Request URL:", full_url.split("?", 1)[0], f"(cookie: {source}, attempt {attempt + 1})")
 
+            response = requests.get(
+                full_url, headers={**self._request_headers(cookie), **sign_headers}, timeout=30
+            )
+            try:
+                data = response.json()
+            except ValueError:
+                # 抖音的反爬拦截页是纯文本，例如 "Blocked by ArgusSecurityPlugin Uifid Not Found"
+                last_block = f"HTTP {response.status_code}: {response.text.strip()[:200]}"
+                print("抖音拒绝了请求:", last_block)
+                continue
 
-            response = requests.get(full_url, headers=kwargs)
+            print("Response JSON:", response.content[:1000])
+            if not data.get("aweme_detail"):
+                reason = (
+                    (data.get("filter_detail") or {}).get("filter_reason")
+                    or data.get("status_msg")
+                    or f"status_code={data.get('status_code')}"
+                )
+                raise ValueError(
+                    f"抖音没有返回视频信息（{reason}）：视频可能已删除、未过审或需要登录。"
+                    "需要登录的视频请在 设置 → 下载 中粘贴抖音 Cookie 后重试"
+                )
+            return data, cookie
 
-            print("Response JSON:", response.content)
-            return response.json()
-        except Exception as e:
-            print("请求失败:", e)
-            raise ValueError("请求失败:", e)
-        # print(kwargs)
+        raise ValueError(
+            f"抖音拒绝了请求（{last_block}）。请在 设置 → 下载 中粘贴登录后的抖音 Cookie 后重试"
+        )
 
     def download(
             self,
@@ -226,14 +263,14 @@ class DouyinDownloader(Downloader):
 
             output_path = os.path.join(output_dir, "%(id)s.%(ext)s")
 
-            video_data = self.fetch_video_info(video_url)
+            video_data, cookie = self._fetch_detail(video_url)
             output_path = output_path % {
                 "id": video_data['aweme_detail']['aweme_id'],
                 "ext": "mp3",
             }
             url = video_data['aweme_detail']['music']['play_url']['uri']
             # 下载音频
-            audio_data = requests.get(url)
+            audio_data = requests.get(url, headers=self._request_headers(cookie), timeout=60)
             with open(output_path, 'wb') as f:
                 f.write(audio_data.content)
             print(url)
@@ -276,22 +313,24 @@ class DouyinDownloader(Downloader):
 
             output_path = os.path.join(output_dir, "%(id)s.%(ext)s")
 
-            video_data = self.fetch_video_info(video_url)
+            video_data, cookie = self._fetch_detail(video_url)
             output_path = output_path % {
                 "id": video_data['aweme_detail']['aweme_id'],
                 "ext": "mp4",
             }
 
             url=video_data['aweme_detail']['video']['download_addr']['url_list'][0]
-            _data = requests.get(url,allow_redirects=True,headers=self.headers_config)
+            _data = requests.get(url, allow_redirects=True, headers=self._request_headers(cookie), timeout=120)
 
             with open(output_path, 'wb') as f:
                 f.write(_data.content)
 
             return output_path
+        except ValueError:
+            raise
         except Exception as e:
             print("请求失败:", e)
-            raise ValueError("请求失败:", e)
+            raise ValueError(f"请求失败: {e}") from e
 
 
 

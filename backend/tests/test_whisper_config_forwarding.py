@@ -52,6 +52,23 @@ def test_note_generator_forwards_configured_whisper_model_size():
     )
 
 
+def test_note_generator_defers_transcriber_until_first_use():
+    _run_isolated(
+        """
+        from app.services import note as note_service
+
+        calls = []
+        note_service.get_transcriber = lambda **kwargs: calls.append(kwargs) or object()
+
+        generator = note_service.NoteGenerator()
+        assert calls == []
+
+        assert generator.transcriber is generator.transcriber
+        assert len(calls) == 1
+        """
+    )
+
+
 def test_whisper_cache_is_rebuilt_when_model_size_changes():
     _run_isolated(
         """
